@@ -1,3 +1,4 @@
+#PCA
 import numpy as np
 import os
 from sklearn.decomposition import PCA
@@ -5,6 +6,8 @@ from skimage.filters import threshold_otsu
 from skimage.feature import canny
 from skimage.morphology import closing, opening, disk
 from sklearn.metrics import confusion_matrix
+from PIL import Image
+import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 
 # 读取多波段影像
@@ -93,7 +96,7 @@ def combined_threshold(diff_image):
 def post_process_change_map(change_map):
     """后处理：腐蚀去除小噪点，然后膨胀恢复边界"""
     # 增大腐蚀操作的结构元素，去除更多噪声
-    eroded_map = opening(change_map, disk(5))  # 使用更大的disk结构元素
+    eroded_map = opening(change_map, disk(5))
     # 增强膨胀操作，保持边界
     processed_map = closing(eroded_map, disk(5))
     return processed_map
@@ -104,93 +107,74 @@ def save_change_map(change_map, save_path):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     change_map_image = Image.fromarray(change_map)
     change_map_image.save(save_path)
+    #print(f"Change detection map saved at {save_path}")
 
 # 计算评价指标：总体精度、错分率、漏分率、Kappa系数
 def calculate_metrics(true_map, pred_map):
-    # 确保只有两类值（0和1）
     true_map = (true_map > 0).astype(np.uint8)
     pred_map = (pred_map > 0).astype(np.uint8)
 
-    # 计算混淆矩阵并解包
     tn, fp, fn, tp = confusion_matrix(true_map.flatten(), pred_map.flatten()).ravel()
 
-    # 计算评价指标
     overall_accuracy = (tp + tn) / (tp + tn + fp + fn)
     
-    # 计算Kappa系数
     kappa = (overall_accuracy - ((fp + fn) * (fp + tp) + (fn + tn) * (tp + tn)) / (tp + tn + fp + fn) ** 2) / \
             (1 - ((fp + fn) * (fp + tp) + (fn + tn) * (tp + tn)) / (tp + tn + fp + fn) ** 2)
-    
-    # 避免除零错误
-    miss_rate = fn / (fn + tp) if (fn + tp) != 0 else 0  # 如果没有检测到任何变化，设置为0
-    commission_error = fp / (fp + tn) if (fp + tn) != 0 else 0  # 同样，避免除零错误
+
+    miss_rate = fn / (fn + tp) if (fn + tp) != 0 else 0
+    commission_error = fp / (fp + tn) if (fp + tn) != 0 else 0
 
     return overall_accuracy, kappa, miss_rate, commission_error
 
-import time
-import os
-import numpy as np
-from tkinter import messagebox
-from PIL import Image
+def process_images(image_folder1, image_folder2, gt_folder, save_folder):
+    """对文件夹下多张图片进行变化检测"""
+    all_metrics = []
 
+    for file_name in os.listdir(image_folder1):
+        image1_path = os.path.join(image_folder1, file_name)
+        image2_path = os.path.join(image_folder2, file_name)
 
-# 运行PCA变化检测并计算评价指标
-def run(image1_path, image2_path, gt_path, save_folder, progress_bar, progress_var):
-    """运行PCA变化检测并计算评价指标"""
-    
-    total_steps = 2  # 总共两步：PCA变化检测和精度计算
+        image1 = read_multiband_image(image1_path)
+        image2 = read_multiband_image(image2_path)
 
-    # 步骤 1: PCA变化检测（包括所有预处理、PCA分析、变化检测等）
-    print("步骤 1: 进行PCA变化检测...")
-    
-    # 读取影像
-    image1 = read_multiband_image(image1_path)
-    image2 = read_multiband_image(image2_path)
-    
-    # 调整影像大小
-    image1_resized, image2_resized = resize_images(image1, image2)
-    
-    # PCA分析
-    image1_pca = apply_pca(image1_resized)
-    image2_pca = apply_pca(image2_resized)
-    
-    # CVA计算差异影像
-    diff_image = calculate_cva(image1_pca, image2_pca)
-    
-    # 图像预处理（去噪）
-    diff_image = preprocess_image(diff_image, sigma=1.0)
-    
-    # 变化检测（使用组合的阈值方法）
-    change_map = combined_threshold(diff_image)
-    
-    # 后处理（形态学操作去噪）
-    processed_change_map = post_process_change_map(change_map)
-    
-    # 保存变化检测图
-    save_path = os.path.join(save_folder, os.path.basename(image1_path))  # 使用相同的文件名
-    save_change_map(processed_change_map, save_path)
+        image1_resized, image2_resized = resize_images(image1, image2)
 
-    # 更新进度条
-    progress_var.set(50)  # 50% 完成
-    progress_bar.update_idletasks()
-    
-    time.sleep(0.5)  # 模拟处理时间
+        # PCA分析
+        image1_pca = apply_pca(image1_resized)
+        image2_pca = apply_pca(image2_resized)
 
-    # 步骤 2: 计算精度并弹出结果窗口
-    print("步骤 2: 计算精度...")
-    
-    # 读取真实变化图
-    gt_map = np.array(Image.open(gt_path))
+        # CVA计算差异影像
+        diff_image = calculate_cva(image1_pca, image2_pca)
 
-    # 计算评价指标
-    overall_accuracy, kappa, miss_rate, commission_error = calculate_metrics(gt_map, processed_change_map)
+        # 图像去噪
+        diff_image = preprocess_image(diff_image, sigma=1.0)
 
-    # 更新进度条
-    progress_var.set(100)  # 100% 完成
-    progress_bar.update_idletasks()
+        # 变化检测：使用组合的阈值方法（全局+局部+边缘）
+        change_map = combined_threshold(diff_image)
 
-    # 弹出结果窗口
-    messagebox.showinfo("PCA结果", f"PCA法变化检测完成，精度：\n总体精度：{overall_accuracy}\n错检率：{commission_error}\n漏检率：{miss_rate}\nKappa系数：{kappa}")
-    
-    return overall_accuracy, kappa, miss_rate, commission_error
+        # 后处理：应用形态学操作去除噪声
+        processed_change_map = post_process_change_map(change_map)
 
+        # 保存变化检测图
+        save_path = os.path.join(save_folder, file_name)
+        save_change_map(processed_change_map, save_path)
+
+        gt_path = os.path.join(gt_folder, file_name)
+        gt_map = np.array(Image.open(gt_path))
+
+        # 计算评价指标
+        metrics = calculate_metrics(gt_map, processed_change_map)
+        all_metrics.append(metrics)
+
+    # 计算所有图像的平均指标
+    avg_metrics = np.mean(all_metrics, axis=0)
+    return avg_metrics
+
+# 主程序
+image_folder1 = 'LEVIR/test/matched/' 
+image_folder2 = 'LEVIR/test/B/' 
+gt_folder = 'LEVIR/test/label/' 
+save_folder = 'LEVIR/test/PCA_label/' 
+
+avg_metrics = process_images(image_folder1, image_folder2, gt_folder, save_folder)
+print(f"Average Metrics: \nOverall Accuracy: {avg_metrics[0]:.4f}, False Positive Rate: {avg_metrics[1]:.4f}, False Negative Rate: {avg_metrics[2]:.4f}, Kappa Coefficient: {avg_metrics[3]:.4f}")
